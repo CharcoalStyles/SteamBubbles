@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import BubbleChart from "./BubbleChart";
 import type { GameViz } from "./BubbleChart";
 
-const BACKEND = "http://localhost:5174";
+const BACKEND =
+  import.meta.env.VITE_BACKEND_URL || "http://localhost:5174";
 
 export default function App() {
   const [me, setMe] = useState<any>(null);
@@ -10,7 +11,6 @@ export default function App() {
   const [games, setGames] = useState<GameViz[]>([]);
   const [error, setError] = useState("");
 
-  // Top-N slider debounce
   const [topNInput, setTopNInput] = useState<number>(100);
   const [topN, setTopN] = useState<number>(100);
 
@@ -18,9 +18,9 @@ export default function App() {
   const [groupByGenre, setGroupByGenre] = useState<boolean>(false);
   const [searchTerm, setSearchTerm] = useState<string>("");
 
-  const [layoutMode, setLayoutMode] = useState<"packed" | "scatter">("packed");
+  const [layoutMode, setLayoutMode] =
+    useState<"packed" | "scatter">("packed");
 
-  // shuffle seed for scatter randomness
   const [shuffleSeed, setShuffleSeed] = useState(0);
 
   useEffect(() => {
@@ -28,7 +28,6 @@ export default function App() {
     return () => clearTimeout(id);
   }, [topNInput]);
 
-  // check login state
   useEffect(() => {
     fetch(`${BACKEND}/api/me`, { credentials: "include" })
       .then(r => r.json())
@@ -56,7 +55,6 @@ export default function App() {
     setRawGames(list);
   }
 
-  // build viz objects safely + optional genre enrichment
   useEffect(() => {
     if (!rawGames.length) return;
 
@@ -74,7 +72,6 @@ export default function App() {
         };
       });
 
-    // scatter layout ignores genre clustering
     if (!groupByGenre || layoutMode === "scatter") {
       setGames(base);
       return;
@@ -135,7 +132,6 @@ export default function App() {
         flexDirection: "column"
       }}
     >
-      {/* Header / controls */}
       <div style={{ padding: 16 }}>
         <h1 style={{ marginBottom: 8 }}>Steam Bubbles</h1>
 
@@ -223,16 +219,10 @@ export default function App() {
               </select>
             </label>
 
-            {/* Shuffle for scatter */}
             <button
               onClick={() => setShuffleSeed(s => s + 1)}
               disabled={layoutMode !== "scatter"}
               style={{ padding: "6px 10px" }}
-              title={
-                layoutMode !== "scatter"
-                  ? "Shuffle only affects Blob/Scatter"
-                  : "Shuffle blob layout"
-              }
             >
               Shuffle
             </button>
@@ -264,7 +254,6 @@ export default function App() {
         )}
       </div>
 
-      {/* Chart area fills remaining screen */}
       <div style={{ flex: 1, minHeight: 0 }}>
         {filtered.length > 0 && (
           <BubbleChart

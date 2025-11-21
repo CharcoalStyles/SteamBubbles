@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import { useMemo, useRef, useState, useEffect } from "react";
 import * as d3 from "d3";
 
 export type GameViz = {
@@ -55,20 +55,17 @@ export default function BubbleChart({
   const height = 720;
   const outerPad = 36;
 
-  // VISUAL ZOOM (does NOT change layout math)
-  const zoom = 1.25; // tweak this only
+  const zoom = 1.25;
   const cx = width / 2;
   const cy = height / 2;
 
   const [hovered, setHovered] = useState<GameViz | null>(null);
   const q = searchTerm.trim().toLowerCase();
 
-  // LINEAR ONLY; keep maxR at your perfect overlap setting
   const sized: SizedGame[] = useMemo(() => {
     const values = games.map(g => g.hours);
     const maxValue = d3.max(values) ?? 1;
 
-    // KEEP THIS at 0.15 (your perfect overlap)
     const maxR = Math.min(width, height) * 0.15;
 
     const rScale = d3
@@ -83,7 +80,6 @@ export default function BubbleChart({
     }));
   }, [games, width, height]);
 
-  // PACKED layout
   const packedLayout = useMemo(() => {
     if (layoutMode !== "packed") {
       return { leaves: [] as LeafNode[], parents: [] as ParentNode[] };
@@ -102,7 +98,7 @@ export default function BubbleChart({
     const root = d3
       .hierarchy(rootData as any)
       .sum((d: any) => d.value || 0)
-      .sort((a, b) => (b.value || 0) - (a.value || 0));
+      .sort((a: any, b: any) => (b.value || 0) - (a.value || 0));
 
     const packed = d3
       .pack<any>()
@@ -131,7 +127,6 @@ export default function BubbleChart({
     return { leaves, parents };
   }, [layoutMode, groupByGenre, sized, width, height, outerPad]);
 
-  // SCATTER / BLOB (edge-to-edge, no overlaps)
   const scatterLayout = useMemo(() => {
     if (layoutMode !== "scatter") return [] as LeafNode[];
 
@@ -194,7 +189,6 @@ export default function BubbleChart({
   const layoutParents =
     layoutMode === "packed" ? packedLayout.parents : [];
 
-  // smooth movement between slider changes
   const prevPosRef = useRef<Map<number, { x: number; y: number; r: number }>>(
     new Map()
   );
@@ -229,11 +223,12 @@ export default function BubbleChart({
           height: "100%",
           background: "#0b0f14",
           display: "block",
-          overflow: "visible" // so zoom doesn't clip
+          overflow: "visible"
         }}
       >
-        {/* VISUAL ZOOM WRAPPER */}
-        <g transform={`translate(${cx},${cy}) scale(${zoom}) translate(${-cx},${-cy})`}>
+        <g
+          transform={`translate(${cx},${cy}) scale(${zoom}) translate(${-cx},${-cy})`}
+        >
           {displayParents.map((p, i) => (
             <g
               key={`parent-${p.name}-${i}`}
