@@ -41,9 +41,9 @@ passport.deserializeUser((user, done) => done(null, user));
 passport.use(
   new SteamStrategy(
     {
-      returnURL: `${process.env.BACKEND_URL}/auth/steam/return`,
-      realm: `${process.env.BACKEND_URL}/`,
-      apiKey: process.env.STEAM_KEY,
+      returnURL: process.env.STEAM_RETURN_URL, // must be https
+      realm: process.env.STEAM_REALM,          // must be https
+      apiKey: process.env.STEAM_API_KEY,
     },
     function verify(identifier, profile, done) {
       const user = {
@@ -55,6 +55,7 @@ passport.use(
     }
   )
 );
+
 
 app.get("/", (req, res) => {
   res.send("SteamBubbles backend is running. Try /api/me or /api/owned-games");
