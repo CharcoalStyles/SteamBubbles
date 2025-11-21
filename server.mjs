@@ -11,6 +11,8 @@ const app = express();
 
 app.use(express.json());
 
+
+
 // CORS for Vite + cookies
 app.use(
   cors({
@@ -53,6 +55,15 @@ passport.use(
     }
   )
 );
+
+app.get("/", (req, res) => {
+  res.send("SteamBubbles backend is running. Try /api/me or /api/owned-games");
+});
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
 
 app.get("/auth/steam", passport.authenticate("steam"));
 
@@ -128,4 +139,8 @@ app.post("/api/appdetails-batch", async (req, res) => {
   res.json(out);
 });
 
-app.listen(5174, () => console.log("API on http://localhost:5174"));
+//app.listen(5174, () => console.log("API on http://localhost:5174"));
+const PORT = process.env.PORT || 5174;
+app.listen(PORT, () => console.log("API on port", PORT));
+
+
