@@ -7,15 +7,15 @@ export type GameViz = {
   hours: number;
   img: string;
   storeUrl: string;
-  genre?: string;
 };
 
 type Props = {
   games: GameViz[];
-  groupByGenre: boolean;
   searchTerm: string;
   layoutMode: "packed" | "scatter";
   shuffleSeed: number;
+  showHoursLabels: boolean;
+  onToggleHide: (appid: number) => void;
 };
 
 type SizedGame = GameViz & {
@@ -30,13 +30,6 @@ type LeafNode = {
   r: number;
 };
 
-type ParentNode = {
-  name: string;
-  x: number;
-  y: number;
-  r: number;
-};
-
 type ScatterNode = SizedGame & {
   x: number;
   y: number;
@@ -44,28 +37,130 @@ type ScatterNode = SizedGame & {
   ty?: number;
 };
 
+// deterministic RNG
+function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function rngForApp(appid: number, seed: number) {
+  const combined = (appid * 2654435761 + seed * 1013904223) >>> 0;
+  return mulberry32(combined);
+}
+
+const clamp = (v: number, lo: number, hi: number) =>
+  Math.max(lo, Math.min(hi, v));
+
 export default function BubbleChart({
   games,
-  groupByGenre,
   searchTerm,
   layoutMode,
-  shuffleSeed
+  shuffleSeed,
+  showHoursLabels,
+  onToggleHide,
 }: Props) {
   const width = 950;
   const height = 720;
   const outerPad = 36;
 
-  const zoom = 1.25;
+  const baseZoom = 1.25;
   const cx = width / 2;
   const cy = height / 2;
 
   const [hovered, setHovered] = useState<GameViz | null>(null);
   const q = searchTerm.trim().toLowerCase();
 
+  // remember scatter positions across renders so they don't reshuffle
+  const scatterPosRef = useRef<Map<number, { x: number; y: number }>>(
+    new Map()
+  );
+  // track last max radius so we can reset when sizes jump
+  const scatterMaxRRef = useRef<number | null>(null);
+
+  /* ---------------- PAN / ZOOM STATE ---------------- */
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [userZoom, setUserZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{
+    dragging: boolean;
+    lastX: number;
+    lastY: number;
+  }>({ dragging: false, lastX: 0, lastY: 0 });
+
+  const handleWheel = (e: React.WheelEvent<SVGSVGElement>) => {
+    e.preventDefault();
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    const rect = svg.getBoundingClientRect();
+    const mx = ((e.clientX - rect.left) / rect.width) * width;
+    const my = ((e.clientY - rect.top) / rect.height) * height;
+
+    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = clamp(userZoom * zoomFactor, 0.5, 4);
+
+    const k = newZoom / userZoom;
+    const newPanX = mx - k * (mx - pan.x);
+    const newPanY = my - k * (my - pan.y);
+
+    setUserZoom(newZoom);
+    setPan({ x: newPanX, y: newPanY });
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    svg.setPointerCapture(e.pointerId);
+    dragRef.current.dragging = true;
+    dragRef.current.lastX = e.clientX;
+    dragRef.current.lastY = e.clientY;
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!dragRef.current.dragging) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    const rect = svg.getBoundingClientRect();
+
+    const dxPx = e.clientX - dragRef.current.lastX;
+    const dyPx = e.clientY - dragRef.current.lastY;
+
+    dragRef.current.lastX = e.clientX;
+    dragRef.current.lastY = e.clientY;
+
+    const dx = (dxPx / rect.width) * width;
+    const dy = (dyPx / rect.height) * height;
+
+    setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    dragRef.current.dragging = false;
+    svg.releasePointerCapture(e.pointerId);
+  };
+
+  const resetView = () => {
+    setUserZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  /* ---------------- SIZE ---------------- */
   const sized: SizedGame[] = useMemo(() => {
-    const values = games.map(g => g.hours);
+    const values = games.map((g) =>
+      Number.isFinite(g.hours) && g.hours > 0 ? g.hours : 0
+    );
     const maxValue = d3.max(values) ?? 1;
 
+    // keep your .15 — do not change this
     const maxR = Math.min(width, height) * 0.15;
 
     const rScale = d3
@@ -73,224 +168,303 @@ export default function BubbleChart({
       .domain([0, maxValue])
       .range([6, maxR]);
 
-    return games.map(g => ({
-      ...g,
-      value: g.hours,
-      r: rScale(g.hours)
-    }));
+    return games.map((g) => {
+      const h = Number.isFinite(g.hours) && g.hours >= 0 ? g.hours : 0;
+      return {
+        ...g,
+        value: h,
+        r: rScale(h),
+      };
+    });
   }, [games, width, height]);
 
+  /* ---------------- PACKED ---------------- */
   const packedLayout = useMemo(() => {
-    if (layoutMode !== "packed") {
-      return { leaves: [] as LeafNode[], parents: [] as ParentNode[] };
-    }
+    if (layoutMode !== "packed") return [] as LeafNode[];
 
-    const rootData = groupByGenre
-      ? {
-          name: "root",
-          children: Array.from(
-            d3.group(sized, d => d.genre || "Other"),
-            ([genre, items]) => ({ name: genre, children: items })
-          )
-        }
-      : { name: "root", children: sized };
+    const ordered = [...sized].sort(
+      (a, b) => b.value - a.value || a.appid - b.appid
+    );
 
+    const rootData = { name: "root", children: ordered };
     const root = d3
-      .hierarchy(rootData as any)
-      .sum((d: any) => d.value || 0)
-      .sort((a: any, b: any) => (b.value || 0) - (a.value || 0));
+      .hierarchy(rootData as unknown as any)
+      .sum((d: any) => d.value || 0);
 
     const packed = d3
       .pack<any>()
       .size([width - outerPad * 2, height - outerPad * 2])
       .padding(5)(root);
 
-    const leaves: LeafNode[] = packed.leaves().map((d: any) => ({
+    return packed.leaves().map((d: any) => ({
       data: d.data,
       x: d.x + outerPad,
       y: d.y + outerPad,
-      r: d.r
+      r: d.r,
     }));
+  }, [layoutMode, sized, width, height, outerPad]);
 
-    const parents: ParentNode[] = groupByGenre
-      ? packed
-          .descendants()
-          .filter((d: any) => d.depth === 1)
-          .map((p: any) => ({
-            name: p.data.name,
-            x: p.x + outerPad,
-            y: p.y + outerPad,
-            r: p.r
-          }))
-      : [];
-
-    return { leaves, parents };
-  }, [layoutMode, groupByGenre, sized, width, height, outerPad]);
-
+  /* ---------------- SCATTER / BLOB (light + stable) ---------------- */
   const scatterLayout = useMemo(() => {
     if (layoutMode !== "scatter") return [] as LeafNode[];
 
-    const nodes: ScatterNode[] = sized.map(d => ({
-      ...d,
-      x: Math.random() * width,
-      y: Math.random() * height
-    }));
+    const prevMaxR = scatterMaxRRef.current;
+    const maxRNow = d3.max(sized.map((s) => s.r)) ?? 1;
 
-    nodes.forEach(n => {
-      n.tx = width / 2 + (Math.random() - 0.5) * width * 0.30;
-      n.ty = height / 2 + (Math.random() - 0.5) * height * 0.30;
+    const significantRadiusChange =
+      prevMaxR != null && Math.abs(maxRNow - prevMaxR) / prevMaxR > 0.2;
+
+    let prev = scatterPosRef.current;
+    if (significantRadiusChange) prev = new Map(); // full reset
+
+    const nodes: ScatterNode[] = sized.map((d) => {
+      const old = prev.get(d.appid);
+      const rng = rngForApp(d.appid, shuffleSeed);
+
+      // when reset, start near center blob with jitter
+      const startX =
+        old?.x ??
+        cx + (rng() - 0.5) * width * 0.35 + (rng() - 0.5) * 30;
+      const startY =
+        old?.y ??
+        cy + (rng() - 0.5) * height * 0.35 + (rng() - 0.5) * 30;
+
+      const tx = cx + (rng() - 0.5) * width * 0.32;
+      const ty = cy + (rng() - 0.5) * height * 0.32;
+
+      return { ...d, x: startX, y: startY, tx, ty };
     });
 
-    const pad = 0.5;
+    const n = nodes.length;
+    const pad = 0.9;
 
+    const runTicks = (sim: d3.Simulation<any, any>, ticks: number) => {
+      for (let i = 0; i < ticks; i++) sim.tick();
+    };
+
+    // scale tick counts by number of bubbles (avoid freezing)
+    const t1 = clamp(180 + n * 1.5, 220, 520);
+    const t2 = clamp(240 + n * 2.0, 320, 720);
+
+    // Phase 1: blob pull + collide
     const sim1 = d3
       .forceSimulation(nodes as any)
       .alpha(1)
+      .alphaDecay(0.05)
       .velocityDecay(0.32)
-      .force("charge", d3.forceManyBody().strength(-2.5))
-      .force("x", d3.forceX((d: any) => d.tx).strength(0.14))
-      .force("y", d3.forceY((d: any) => d.ty).strength(0.14))
+      .force("x", d3.forceX((d: any) => d.tx).strength(0.06))
+      .force("y", d3.forceY((d: any) => d.ty).strength(0.06))
       .force(
         "collide",
-        d3.forceCollide((d: any) => d.r + pad).iterations(6)
+        d3.forceCollide((d: any) => d.r + pad).iterations(9)
       )
       .stop();
 
-    for (let i = 0; i < 420; i++) sim1.tick();
+    runTicks(sim1, t1);
 
+    // Phase 2: stronger collide to finish edge-to-edge
     const sim2 = d3
       .forceSimulation(nodes as any)
-      .alpha(0.8)
-      .velocityDecay(0.35)
+      .alpha(0.9)
+      .alphaDecay(0.03)
+      .velocityDecay(0.45)
       .force(
         "collide",
-        d3.forceCollide((d: any) => d.r + pad).strength(1).iterations(10)
+        d3
+          .forceCollide((d: any) => d.r + pad)
+          .strength(1)
+          .iterations(14)
       )
       .stop();
 
-    for (let i = 0; i < 520; i++) sim2.tick();
+    runTicks(sim2, t2);
 
-    nodes.forEach(n => {
-      n.x = Math.max(n.r + outerPad, Math.min(width - n.r - outerPad, n.x));
-      n.y = Math.max(n.r + outerPad, Math.min(height - n.r - outerPad, n.y));
+    // clamp to bounds
+    nodes.forEach((node) => {
+      node.x = Math.max(
+        node.r + outerPad,
+        Math.min(width - node.r - outerPad, node.x)
+      );
+      node.y = Math.max(
+        node.r + outerPad,
+        Math.min(height - node.r - outerPad, node.y)
+      );
     });
 
-    return nodes.map(n => ({
-      data: n,
-      x: n.x,
-      y: n.y,
-      r: n.r
+    // tiny cleanup only for smaller N (skip costly scans for huge libs)
+    if (n <= 140) {
+      let overlaps = 0;
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const a = nodes[i], b = nodes[j];
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < a.r + b.r + pad - 0.5) overlaps++;
+          if (overlaps > 6) break;
+        }
+        if (overlaps > 6) break;
+      }
+
+      if (overlaps > 0) {
+        const sim3 = d3
+          .forceSimulation(nodes as any)
+          .alpha(0.6)
+          .alphaDecay(0.06)
+          .velocityDecay(0.5)
+          .force("centerX", d3.forceX(cx).strength(0.02))
+          .force("centerY", d3.forceY(cy).strength(0.02))
+          .force(
+            "collide",
+            d3
+              .forceCollide((d: any) => d.r + pad)
+              .strength(1)
+              .iterations(18)
+          )
+          .stop();
+
+        runTicks(sim3, 260);
+      }
+    }
+
+    const next = new Map<number, { x: number; y: number }>();
+    nodes.forEach((node) => next.set(node.appid, { x: node.x, y: node.y }));
+    scatterPosRef.current = next;
+    scatterMaxRRef.current = maxRNow;
+
+    return nodes.map((node) => ({
+      data: node,
+      x: node.x,
+      y: node.y,
+      r: node.r,
     }));
-  }, [layoutMode, sized, width, height, outerPad, shuffleSeed]);
+  }, [layoutMode, sized, width, height, outerPad, shuffleSeed, cx, cy]);
 
   const layoutLeaves =
-    layoutMode === "packed" ? packedLayout.leaves : scatterLayout;
+    layoutMode === "packed" ? packedLayout : scatterLayout;
 
-  const layoutParents =
-    layoutMode === "packed" ? packedLayout.parents : [];
-
-  const prevPosRef = useRef<Map<number, { x: number; y: number; r: number }>>(
-    new Map()
-  );
-
+  /* ---------------- SMOOTH TRANSITIONS ---------------- */
+  const prevPosRef = useRef<
+    Map<number, { x: number; y: number; r: number }>
+  >(new Map());
   const [displayLeaves, setDisplayLeaves] = useState<LeafNode[]>([]);
-  const [displayParents, setDisplayParents] = useState<ParentNode[]>([]);
 
   useEffect(() => {
-    const prev = prevPosRef.current;
-    const nextLeaves = layoutLeaves.map(l => {
-      const p = prev.get(l.data.appid);
+    const prevMap = prevPosRef.current;
+
+    const nextLeaves = layoutLeaves.map((l) => {
+      const p = prevMap.get(l.data.appid);
       return p ? { ...l } : l;
     });
 
     const newPrev = new Map<number, { x: number; y: number; r: number }>();
-    nextLeaves.forEach(l =>
+    nextLeaves.forEach((l) =>
       newPrev.set(l.data.appid, { x: l.x, y: l.y, r: l.r })
     );
     prevPosRef.current = newPrev;
 
     setDisplayLeaves(nextLeaves);
-    setDisplayParents(layoutParents);
-  }, [layoutLeaves, layoutParents]);
+  }, [layoutLeaves]);
+
+  const baseTransform = `translate(${cx},${cy}) scale(${baseZoom}) translate(${-cx},${-cy})`;
+  const userTransform = `translate(${pan.x},${pan.y}) scale(${userZoom})`;
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <svg
+        ref={svgRef}
         viewBox={`0 0 ${width} ${height}`}
         preserveAspectRatio="xMidYMid meet"
+        onWheel={handleWheel}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerUp}
+        onDoubleClick={resetView}
         style={{
           width: "100%",
           height: "100%",
           background: "#0b0f14",
           display: "block",
-          overflow: "visible"
+          overflow: "visible",
+          touchAction: "none",
+          cursor: dragRef.current.dragging ? "grabbing" : "grab",
         }}
       >
-        <g
-          transform={`translate(${cx},${cy}) scale(${zoom}) translate(${-cx},${-cy})`}
-        >
-          {displayParents.map((p, i) => (
-            <g
-              key={`parent-${p.name}-${i}`}
-              style={{
-                transform: `translate(${p.x}px, ${p.y}px)`,
-                transition: "transform 600ms ease"
-              }}
-            >
-              <circle
-                r={p.r}
-                fill="none"
-                stroke="#35506b"
-                strokeWidth={2}
-                opacity={0.7}
-              />
-            </g>
-          ))}
+        <g transform={baseTransform}>
+          <g transform={userTransform}>
+            {displayLeaves.map((l, i) => {
+              const g = l.data;
+              const match = q && g.name.toLowerCase().includes(q);
+              const labelSize = Math.max(8, Math.min(18, l.r / 3));
 
-          {displayLeaves.map((l, i) => {
-            const g = l.data;
-            const match = q && g.name.toLowerCase().includes(q);
+              return (
+                <g
+                  key={g.appid}
+                  onMouseEnter={() => setHovered(g)}
+                  onMouseLeave={() => setHovered(null)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    onToggleHide(g.appid);
+                  }}
+                  onClick={(e) => {
+                    if (e.shiftKey) {
+                      e.preventDefault();
+                      onToggleHide(g.appid);
+                      return;
+                    }
+                    window.open(g.storeUrl, "_blank");
+                  }}
+                  style={{
+                    cursor: "pointer",
+                    transform: `translate(${l.x}px, ${l.y}px)`,
+                    transition: "transform 600ms ease, opacity 250ms ease",
+                    transformBox: "fill-box",
+                    transformOrigin: "center",
+                  }}
+                >
+                  <defs>
+                    <clipPath id={`clip-${layoutMode}-${i}`}>
+                      <circle r={l.r} />
+                    </clipPath>
+                  </defs>
 
-            return (
-              <g
-                key={g.appid}
-                onMouseEnter={() => setHovered(g)}
-                onMouseLeave={() => setHovered(null)}
-                onClick={() => window.open(g.storeUrl, "_blank")}
-                style={{
-                  cursor: "pointer",
-                  transform: `translate(${l.x}px, ${l.y}px)`,
-                  transition: "transform 600ms ease, opacity 250ms ease",
-                  transformBox: "fill-box",
-                  transformOrigin: "center"
-                }}
-              >
-                <defs>
-                  <clipPath id={`clip-${layoutMode}-${i}`}>
-                    <circle r={l.r} />
-                  </clipPath>
-                </defs>
+                  <circle
+                    r={l.r}
+                    fill="#1b2838"
+                    stroke={match ? "#ffd166" : "#2a475e"}
+                    strokeWidth={match ? 4 : 1.5}
+                  />
 
-                <circle
-                  r={l.r}
-                  fill="#1b2838"
-                  stroke={match ? "#ffd166" : "#2a475e"}
-                  strokeWidth={match ? 4 : 1.5}
-                />
+                  <image
+                    href={g.img}
+                    x={-l.r}
+                    y={-l.r}
+                    width={2 * l.r}
+                    height={2 * l.r}
+                    clipPath={`url(#clip-${layoutMode}-${i})`}
+                    preserveAspectRatio="xMidYMid slice"
+                    opacity={0.92}
+                  />
 
-                <image
-                  href={g.img}
-                  x={-l.r}
-                  y={-l.r}
-                  width={2 * l.r}
-                  height={2 * l.r}
-                  clipPath={`url(#clip-${layoutMode}-${i})`}
-                  preserveAspectRatio="xMidYMid slice"
-                  opacity={0.92}
-                />
-              </g>
-            );
-          })}
+                  {showHoursLabels && g.hours > 0 && (
+                    <text
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fontSize={labelSize}
+                      fill="white"
+                      stroke="black"
+                      strokeWidth={2}
+                      paintOrder="stroke"
+                      style={{ pointerEvents: "none", userSelect: "none" }}
+                    >
+                      {g.hours.toFixed(1)}h
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </g>
         </g>
       </svg>
 
@@ -305,20 +479,35 @@ export default function BubbleChart({
             padding: "10px 12px",
             borderRadius: 8,
             width: 260,
-            color: "white"
+            color: "white",
           }}
         >
           <div style={{ fontWeight: 700 }}>{hovered.name}</div>
           <div style={{ opacity: 0.85, marginTop: 4 }}>
             {hovered.hours.toFixed(1)} hours played
           </div>
-          {hovered.genre && groupByGenre && layoutMode === "packed" && (
-            <div style={{ opacity: 0.75, marginTop: 4 }}>
-              Genre: {hovered.genre}
-            </div>
-          )}
+
+          <button
+            onClick={() => onToggleHide(hovered.appid)}
+            style={{
+              marginTop: 8,
+              padding: "6px 8px",
+              background: "#0b0f14",
+              color: "white",
+              border: "1px solid #2a475e",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            Hide this game
+          </button>
+
           <div style={{ opacity: 0.6, marginTop: 8 }}>
-            Click bubble to open store page
+            Scroll: zoom
+            <br />
+            Drag: pan
+            <br />
+            Double-click: reset view
           </div>
         </div>
       )}

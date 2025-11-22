@@ -28,6 +28,9 @@ const STEAM_RETURN_URL =
 const STEAM_REALM =
   process.env.STEAM_REALM || `${BACKEND_URL}/`;
 
+const isProd = process.env.NODE_ENV === "production";
+
+console.log("NODE_ENV         =", process.env.NODE_ENV);
 console.log("BACKEND_URL      =", BACKEND_URL);
 console.log("FRONTEND_URL     =", FRONTEND_URL);
 console.log("CLIENT_ORIGIN    =", CLIENT_ORIGIN);
@@ -52,8 +55,8 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      sameSite: "none",
-      secure: true, // required for cross-site cookies on Render HTTPS
+      sameSite: isProd ? "none" : "lax",
+      secure: isProd,
     },
   })
 );
@@ -82,6 +85,23 @@ passport.use(
     }
   )
 );
+
+/* ------------------------- HELPERS ------------------------- */
+function isSteamId64(x) {
+  return typeof x === "string" && /^[0-9]{17}$/.test(x);
+}
+
+async function resolveVanityToSteamId(vanity) {
+  const url =
+    `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/` +
+    `?key=${STEAM_API_KEY}` +
+    `&vanityurl=${encodeURIComponent(vanity)}`;
+
+  const r = await fetch(url);
+  const j = await r.json();
+  if (j?.response?.success === 1) return j.response.steamid;
+  return null;
+}
 
 /* ------------------------- BASIC ROUTES ------------------------- */
 app.get("/", (req, res) => {
@@ -115,13 +135,33 @@ app.get("/api/me", (req, res) => {
   res.json({ loggedIn: true, user: req.user });
 });
 
-// Get games for currently logged-in user
+// Get games for logged-in OR manual steamid (?steamid=...)
 app.get("/api/owned-games", async (req, res) => {
   try {
-    if (!req.user?.steamid) {
-      return res.status(401).json({ error: "Not logged in" });
+    let steamid =
+      req.query.steamid ||
+      req.session?.manualSteamId ||
+      req.user?.steamid;
+
+    if (!steamid) {
+      return res.status(400).json({ error: "No steamid provided." });
     }
-    const steamid = req.user.steamid;
+
+    // Vanity name support
+    if (!isSteamId64(steamid)) {
+      const resolved = await resolveVanityToSteamId(steamid);
+      if (!resolved) {
+        return res.status(400).json({
+          error: "Could not resolve vanity name. Try SteamID64."
+        });
+      }
+      steamid = resolved;
+    }
+
+    // store manual ID so refreshes work without retyping
+    if (req.query.steamid) {
+      req.session.manualSteamId = steamid;
+    }
 
     const url =
       `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/` +
@@ -149,7 +189,7 @@ app.post("/api/appdetails-batch", async (req, res) => {
     }
 
     const out = {};
-    const limited = appids.slice(0, 250); // avoid huge spam
+    const limited = appids.slice(0, 250);
 
     await Promise.all(
       limited.map(async (appid) => {
